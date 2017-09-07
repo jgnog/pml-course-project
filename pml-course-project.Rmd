@@ -1,0 +1,158 @@
+---
+title: Identification of common mistakes on performing a dumbbell lift using movement
+  sensors
+author: "Gonçalo Nogueira"
+date: "August 11, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(dplyr)
+library(randomForest)
+```
+
+## Summary
+
+This study uses data collected by *Velloso et al* where four inertial measurement units
+were placed on three different spots of the subject performing the exercise and on
+the dumbell being raised. The raw data on the six subjects was preprocessed by the authors
+by defining windows and calculating statistics on each of the signals provided by the
+IMU's. The `classe` variable is the outcome and it can take different values based on
+the technique of the subject performing the exercise.
+
+Our approach started with some feature reduction, first by identifying covariates with near
+zero variance and then by using a kind of wrapper method. We built a random forest model
+on a subset of the training data using all variables. Then we calculated the importance
+of each variable in the model and used the 10 most importante features in the final model.
+
+The final model is a random forests model with an overall accuracy of approximately 98.4%. It is
+very accurate at correctly identifying class A and class E cases, but not so accurate in other cases.
+
+## Exploratory data analysis
+
+```{r}
+dataset <- read.csv("pml-training.csv")
+final.testing <- read.csv("pml-testing.csv")
+
+dim(dataset)
+```
+The dataset consists of 19622 observations with 160 variables. If one explores the
+dataset, one will find some variables that were imported as factors, but are in fact numeric.
+They were thus imported because some observations have the string `"#DIV/0"` as the value
+of these variables. So we will replace this string with `NA` on these variables.
+
+```{r, warning=FALSE}
+factor.variables <- sapply(colnames(dataset), function(x) class(dataset[,x]) == "factor")
+# There are some factor variables that we don't want to process in this way,
+# so let's take them out of the list
+factor.variables["user_name"] <- FALSE
+factor.variables["classe"] <- FALSE
+factor.variables["cvtd_timestamp"] <- FALSE
+factor.variables["new_window"] <- FALSE
+x <- apply(dataset[ ,factor.variables], 2, function(x) grep("#DIV/0!", x))
+j <- 1
+for (i in seq_along(factor.variables)) {
+  if (factor.variables[i]) {
+    dataset[x[[j]], i] <- NA
+    f <- dataset[ , i]
+    dataset[ , i] <- as.numeric(levels(f))[f]
+    j <- j + 1
+  }
+}
+
+proportion.of.nas.by.col <- apply(dataset, 2, function(x) sum(is.na(x)) / length(x))
+length(proportion.of.nas.by.col[proportion.of.nas.by.col > .9])
+```
+
+As we can see above, 100 variables are `NA` on 90% or more observations. Obviously, these variables
+are of no use in the training of a model, so we will filter these out.
+
+```{r}
+dataset <- dataset[, !(proportion.of.nas.by.col > .9)]
+```
+
+If we dig into the names of the variables, we can see that there are a few ones that do not make
+sense in building this model. Specifically, the following variables probably won't add any
+value to the model:
+
+  * `X` - this is just an identifier of the observation; we already have the dataframe row
+          number for that.
+  * `raw_timestamp_part_1`, `raw_timestamp_part_2` and `cvtd_timestamp` - the time and date at which
+          the exercise was done is of no interest to us.
+  * `num_window` and `new_window` - this has to do with the way the researchers preprocessed the data
+          and is of no interest to us.
+  * `user_name` - since we're building a model that should apply to any subject, this variable can
+  be discarded.
+                  
+So let's remove these variables from the dataset. Some predictor variables are integers but
+this doesn't make much sense, so let's also convert all variables to numeric.
+
+```{r}
+dataset <- select(dataset,
+                   -X,
+                   -raw_timestamp_part_1,
+                   -raw_timestamp_part_2,
+                   -cvtd_timestamp,
+                   -num_window,
+                   -new_window,
+                   -user_name)
+dataset[ , -53] <- as.data.frame(sapply(dataset[,-53], as.numeric))
+```
+
+Now we're down to 52 predictors. We will build a random forests model on a subset of
+10% of the observations of the dataset and then we will look into the importance of each of
+the features in that model. Then we will use the 10 most important features to train the
+final random forests model.
+
+First let's partition our data into training and testing datasets. We will use 70% of the
+data as the training portion and the rest as the testing portion.
+
+```{r}
+inTrain <- createDataPartition(dataset$classe, p = 0.7, list = FALSE)
+training <- dataset[inTrain, ]
+testing <- dataset[-inTrain, ]
+```
+
+
+```{r, cache = TRUE}
+set.seed(1234)
+for.feature.selection <- createDataPartition(training$classe, p = 0.1, list = FALSE)
+feature.selection.subset <- training[for.feature.selection, ]
+model <- randomForest(classe ~ ., feature.selection.subset)
+variable.importance <- varImp(model)
+variable.importance <- data.frame(variable = rownames(variable.importance),
+                                  importance = variable.importance,
+                                  stringsAsFactors = FALSE)
+predictors.final.model <- head(arrange(variable.importance, desc(Overall)), n = 10)
+predictors.final.model
+```
+Now that we have a reasonable subset of variables, we will subset the training dataset and build
+the final random forests model.
+
+```{r, cache=TRUE}
+training <- select(training, predictors.final.model$variable, classe)
+testing <- select(testing, predictors.final.model$variable, classe)
+final.model <- train(classe ~ ., training,  method = "rf")
+```
+
+We will now evaluate our model by computing a confusion matrix and the overall accuracy of the model
+using the testing partition of the original dataset.
+
+```{r}
+predictions <- predict(final.model, testing)
+confusionMatrix(predictions, testing$classe)
+```
+
+So we have an overall accuracy that falls within the 95% confidence interval 98.05% to 98.71%. Looking
+at the sensitivity statistics, we can see that the model is particularly accurate at predicting a
+class A, D or E case (sensitivity is above or near 99%) but is a bit weaker at predicting other classes, especially class B which presents sensitivity of only 96.8%.
+
+Let's now calculate the predictions for the final testing dataset of 20 observations that will
+have to be inputted in the quiz.
+
+```{r}
+final.predictions <- predict(final.model, final.testing)
+final.predictions
+```
